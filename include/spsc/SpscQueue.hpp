@@ -5,22 +5,34 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace spsc {
+
+inline constexpr std::size_t kCacheLineSize = 64;
 
 template <class T>
 class SpscQueue {
  public:
   explicit SpscQueue(std::size_t capacity)
-      : capacity_(capacity), buffer_(capacity + 1) {
-    if (capacity == 0) {
-      throw std::invalid_argument("capacity must be >= 1");
+      : capacity_(require_positive(capacity)),
+        slot_count_(capacity + 1),
+        base_(allocate(capacity + 1 + 2 * kPadElems)),
+        buffer_(base_ + kPadElems) {}
+
+  ~SpscQueue() {
+    std::size_t head = head_.load(std::memory_order_relaxed);
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);
+    while (head != tail) {
+      slot(head)->~T();
+      head = next(head);
     }
+    deallocate(base_, slot_count_ + 2 * kPadElems);
   }
 
   SpscQueue(const SpscQueue&) = delete;
@@ -33,7 +45,7 @@ class SpscQueue {
       cached_head_ = head_.load(std::memory_order_acquire);
       if (next_tail == cached_head_) return false;
     }
-    buffer_[tail] = item;
+    new (slot(tail)) T(item);
     tail_.store(next_tail, std::memory_order_release);
     return true;
   }
@@ -45,7 +57,7 @@ class SpscQueue {
       cached_head_ = head_.load(std::memory_order_acquire);
       if (next_tail == cached_head_) return false;
     }
-    buffer_[tail] = std::move(item);
+    new (slot(tail)) T(std::move(item));
     tail_.store(next_tail, std::memory_order_release);
     return true;
   }
@@ -56,7 +68,9 @@ class SpscQueue {
       cached_tail_ = tail_.load(std::memory_order_acquire);
       if (head == cached_tail_) return std::nullopt;
     }
-    std::optional<T> result(std::move(buffer_[head]));
+    T* cell = slot(head);
+    std::optional<T> result(std::move(*cell));
+    cell->~T();
     head_.store(next(head), std::memory_order_release);
     return result;
   }
@@ -92,22 +106,42 @@ class SpscQueue {
   std::size_t size() const {
     const std::size_t tail = tail_.load(std::memory_order_acquire);
     const std::size_t head = head_.load(std::memory_order_acquire);
-    return tail >= head ? tail - head : buffer_.size() - head + tail;
+    return tail >= head ? tail - head : slot_count_ - head + tail;
   }
 
  private:
-  std::size_t next(std::size_t i) const noexcept {
-    ++i;
-    return i == buffer_.size() ? 0 : i;
+  static constexpr std::size_t kPadElems =
+      (kCacheLineSize + sizeof(T) - 1) / sizeof(T);
+
+  static std::size_t require_positive(std::size_t capacity) {
+    if (capacity == 0) {
+      throw std::invalid_argument("capacity must be >= 1");
+    }
+    return capacity;
   }
 
-  std::size_t capacity_;
-  std::vector<T> buffer_;
-  alignas(64) std::atomic<std::size_t> head_{0};
-  alignas(64) std::atomic<std::size_t> tail_{0};
-  alignas(64) std::size_t cached_head_ = 0;
-  alignas(64) std::size_t cached_tail_ = 0;
-  
+  static T* allocate(std::size_t count) {
+    return std::allocator<T>().allocate(count);
+  }
+  static void deallocate(T* p, std::size_t count) noexcept {
+    std::allocator<T>().deallocate(p, count);
+  }
+
+  T* slot(std::size_t i) noexcept { return buffer_ + i; }
+
+  std::size_t next(std::size_t i) const noexcept {
+    ++i;
+    return i == slot_count_ ? 0 : i;
+  }
+
+  const std::size_t capacity_;
+  const std::size_t slot_count_; 
+  T* const base_;
+  T* const buffer_;
+  alignas(kCacheLineSize) std::atomic<std::size_t> head_{0};
+  alignas(kCacheLineSize) std::atomic<std::size_t> tail_{0};
+  alignas(kCacheLineSize) std::size_t cached_head_ = 0;
+  alignas(kCacheLineSize) std::size_t cached_tail_ = 0;
 };
 }
 
