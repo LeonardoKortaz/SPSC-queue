@@ -1,3 +1,5 @@
+// Concurrent stress tests: one producer, one consumer. Run under ThreadSanitizer for a race check.
+
 #include "spsc/SpscQueue.hpp"
 
 #include <cstdint>

@@ -1,3 +1,5 @@
+// Single-threaded correctness tests.
+
 #include "spsc/SpscQueue.hpp"
 
 #include <atomic>

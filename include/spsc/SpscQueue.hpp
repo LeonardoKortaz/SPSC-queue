@@ -19,6 +19,7 @@ inline constexpr std::size_t kCacheLineSize = 64;
 template <class T>
 class SpscQueue {
  public:
+  // one spare slot: lets empty (head==tail) and full (next(tail)==head) stay distinct
   explicit SpscQueue(std::size_t capacity)
       : capacity_(require_positive(capacity)),
         slot_count_(capacity + 1),
@@ -35,8 +36,10 @@ class SpscQueue {
     deallocate(base_, slot_count_ + 2 * kPadElems);
   }
 
+  
   SpscQueue(const SpscQueue&) = delete;
   SpscQueue& operator=(const SpscQueue&) = delete;
+
 
   bool try_push(const T& item) {
     const std::size_t tail = tail_.load(std::memory_order_relaxed);
@@ -46,7 +49,7 @@ class SpscQueue {
       if (next_tail == cached_head_) return false;
     }
     new (slot(tail)) T(item);
-    tail_.store(next_tail, std::memory_order_release);
+    tail_.store(next_tail, std::memory_order_release);  // release: pairs with the consumer's acquire on tail_
     return true;
   }
 
@@ -93,6 +96,11 @@ class SpscQueue {
     }
   }
 
+
+  std::size_t capacity() const { return capacity_; }
+
+
+   // these three are approximate while both threads are running
   bool empty() const {
     return head_.load(std::memory_order_acquire) ==
            tail_.load(std::memory_order_acquire);
@@ -101,13 +109,14 @@ class SpscQueue {
     const std::size_t tail = tail_.load(std::memory_order_acquire);
     return next(tail) == head_.load(std::memory_order_acquire);
   }
-  std::size_t capacity() const { return capacity_; }
+
 
   std::size_t size() const {
     const std::size_t tail = tail_.load(std::memory_order_acquire);
     const std::size_t head = head_.load(std::memory_order_acquire);
     return tail >= head ? tail - head : slot_count_ - head + tail;
   }
+
 
  private:
   static constexpr std::size_t kPadElems =
